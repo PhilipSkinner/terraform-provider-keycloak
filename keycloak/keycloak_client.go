@@ -311,6 +311,9 @@ func (keycloakClient *KeycloakClient) sendRequest(ctx context.Context, request *
 		}
 	}
 
+	shouldSendRequest := true
+	retryAttempts := 0
+
 	requestMethod := request.Method
 	requestPath := request.URL.Path
 
@@ -328,65 +331,87 @@ func (keycloakClient *KeycloakClient) sendRequest(ctx context.Context, request *
 
 	keycloakClient.addRequestHeaders(request)
 
-	response, err := keycloakClient.httpClient.Do(request)
-	if err != nil {
-		return nil, "", fmt.Errorf("error sending request: %v", err)
-	}
+	for shouldSendRequest {
+		shouldSendRequest = false
+		retryAttempts += 1
 
-	// Unauthorized: Token could have expired
-	// Forbidden: After creating a realm, following GETs for the realm return 403 until you refresh
-	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		tflog.Debug(ctx, "Got unexpected response, attempting refresh", map[string]interface{}{
+		if retryAttempts > 5 {
+			return nil, "", nil
+		}
+
+		response, err := keycloakClient.httpClient.Do(request)
+
+		if err != nil {
+			return nil, "", fmt.Errorf("error sending request: %v", err)
+		}
+
+		// Unauthorized: Token could have expired
+		// Forbidden: After creating a realm, following GETs for the realm return 403 until you refresh
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			tflog.Debug(ctx, "Got unexpected response, attempting refresh", map[string]interface{}{
+				"status": response.Status,
+			})
+
+			err := keycloakClient.refresh(ctx)
+			if err != nil {
+				return nil, "", fmt.Errorf("error refreshing credentials: %s", err)
+			}
+
+			keycloakClient.addRequestHeaders(request)
+
+			// retry
+			shouldSendRequest = true
+			continue
+		}
+
+		defer response.Body.Close()
+
+		responseBody, err := ioutil.ReadAll(response.Body)
+		if err != nil {
+			return nil, "", err
+		}
+
+		responseLogArgs := map[string]interface{}{
 			"status": response.Status,
-		})
-
-		err := keycloakClient.refresh(ctx)
-		if err != nil {
-			return nil, "", fmt.Errorf("error refreshing credentials: %s", err)
 		}
 
-		keycloakClient.addRequestHeaders(request)
-
-		if body != nil {
-			request.Body = ioutil.NopCloser(bytes.NewReader(body))
-		}
-		response, err = keycloakClient.httpClient.Do(request)
-		if err != nil {
-			return nil, "", fmt.Errorf("error sending request after refresh: %v", err)
-		}
-	}
-
-	defer response.Body.Close()
-
-	responseBody, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		return nil, "", err
-	}
-
-	responseLogArgs := map[string]interface{}{
-		"status": response.Status,
-	}
-
-	if len(responseBody) != 0 && request.URL.Path != "/auth/admin/serverinfo" {
-		responseLogArgs["body"] = string(responseBody)
-	}
-
-	tflog.Debug(ctx, "Received response", responseLogArgs)
-
-	if response.StatusCode >= 400 {
-		errorMessage := fmt.Sprintf("error sending %s request to %s: %s.", request.Method, request.URL.Path, response.Status)
-
-		if len(responseBody) != 0 {
-			errorMessage = fmt.Sprintf("%s Response body: %s", errorMessage, responseBody)
+		if len(responseBody) != 0 && request.URL.Path != "/auth/admin/serverinfo" {
+			responseLogArgs["body"] = string(responseBody)
 		}
 
-		return nil, "", &ApiError{
-			Code:    response.StatusCode,
-			Message: errorMessage,
+		tflog.Debug(ctx, "Received response", responseLogArgs)
+
+		// should retry on 429
+		if response.StatusCode == 429 {
+			shouldSendRequest = true
+			time.Sleep(5 * time.Second)
+			continue
 		}
+
+		// should retry on 500
+		if response.StatusCode >= 500 {
+			shouldSendRequest = true
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		if response.StatusCode >= 400 {
+			errorMessage := fmt.Sprintf("error sending %s request to %s: %s.", request.Method, request.URL.Path, response.Status)
+
+			if len(responseBody) != 0 {
+				errorMessage = fmt.Sprintf("%s Response body: %s", errorMessage, responseBody)
+			}
+
+			return nil, "", &ApiError{
+				Code:    response.StatusCode,
+				Message: errorMessage,
+			}
+		}
+
+		return responseBody, response.Header.Get("Location"), nil
 	}
 
-	return responseBody, response.Header.Get("Location"), nil
+	return nil, "", nil
 }
 
 func (keycloakClient *KeycloakClient) get(ctx context.Context, path string, resource interface{}, params map[string]string) error {
