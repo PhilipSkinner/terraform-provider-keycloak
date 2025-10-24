@@ -2,9 +2,11 @@ package keycloak
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"github.com/mrparkers/terraform-provider-keycloak/keycloak/types"
 	"reflect"
+
+	"github.com/keycloak/terraform-provider-keycloak/keycloak/types"
 )
 
 type OpenidClientRole struct {
@@ -56,30 +58,34 @@ type OpenidClient struct {
 	AuthorizationSettings              *OpenidClientAuthorizationSettings       `json:"authorizationSettings,omitempty"`
 	ConsentRequired                    bool                                     `json:"consentRequired"`
 	AuthenticationFlowBindingOverrides OpenidAuthenticationFlowBindingOverrides `json:"authenticationFlowBindingOverrides,omitempty"`
+	AlwaysDisplayInConsole             bool                                     `json:"alwaysDisplayInConsole"`
 }
 
 type OpenidClientAttributes struct {
-	PkceCodeChallengeMethod               string                           `json:"pkce.code.challenge.method"`
-	ExcludeSessionStateFromAuthResponse   types.KeycloakBoolQuoted         `json:"exclude.session.state.from.auth.response"`
-	AccessTokenLifespan                   string                           `json:"access.token.lifespan"`
-	LoginTheme                            string                           `json:"login_theme"`
-	ClientOfflineSessionIdleTimeout       string                           `json:"client.offline.session.idle.timeout,omitempty"`
-	DisplayOnConsentScreen                types.KeycloakBoolQuoted         `json:"display.on.consent.screen"`
-	ConsentScreenText                     string                           `json:"consent.screen.text"`
-	ClientOfflineSessionMaxLifespan       string                           `json:"client.offline.session.max.lifespan,omitempty"`
-	ClientSessionIdleTimeout              string                           `json:"client.session.idle.timeout,omitempty"`
-	ClientSessionMaxLifespan              string                           `json:"client.session.max.lifespan,omitempty"`
-	UseRefreshTokens                      types.KeycloakBoolQuoted         `json:"use.refresh.tokens"`
-	UseRefreshTokensClientCredentials     types.KeycloakBoolQuoted         `json:"client_credentials.use_refresh_token"`
-	BackchannelLogoutUrl                  string                           `json:"backchannel.logout.url"`
-	FrontchannelLogoutUrl                 string                           `json:"frontchannel.logout.url"`
-	BackchannelLogoutRevokeOfflineTokens  types.KeycloakBoolQuoted         `json:"backchannel.logout.revoke.offline.tokens"`
-	BackchannelLogoutSessionRequired      types.KeycloakBoolQuoted         `json:"backchannel.logout.session.required"`
-	ExtraConfig                           map[string]interface{}           `json:"-"`
-	Oauth2DeviceAuthorizationGrantEnabled types.KeycloakBoolQuoted         `json:"oauth2.device.authorization.grant.enabled"`
-	Oauth2DeviceCodeLifespan              string                           `json:"oauth2.device.code.lifespan,omitempty"`
-	Oauth2DevicePollingInterval           string                           `json:"oauth2.device.polling.interval,omitempty"`
-	PostLogoutRedirectUris                types.KeycloakSliceHashDelimited `json:"post.logout.redirect.uris,omitempty"`
+	PkceCodeChallengeMethod                  string                           `json:"pkce.code.challenge.method"`
+	ExcludeSessionStateFromAuthResponse      types.KeycloakBoolQuoted         `json:"exclude.session.state.from.auth.response"`
+	ExcludeIssuerFromAuthResponse            types.KeycloakBoolQuoted         `json:"exclude.issuer.from.auth.response"`
+	AccessTokenLifespan                      string                           `json:"access.token.lifespan"`
+	LoginTheme                               string                           `json:"login_theme"`
+	ClientOfflineSessionIdleTimeout          string                           `json:"client.offline.session.idle.timeout,omitempty"`
+	DisplayOnConsentScreen                   types.KeycloakBoolQuoted         `json:"display.on.consent.screen"`
+	ConsentScreenText                        string                           `json:"consent.screen.text"`
+	ClientOfflineSessionMaxLifespan          string                           `json:"client.offline.session.max.lifespan,omitempty"`
+	ClientSessionIdleTimeout                 string                           `json:"client.session.idle.timeout,omitempty"`
+	ClientSessionMaxLifespan                 string                           `json:"client.session.max.lifespan,omitempty"`
+	UseRefreshTokens                         types.KeycloakBoolQuoted         `json:"use.refresh.tokens"`
+	UseRefreshTokensClientCredentials        types.KeycloakBoolQuoted         `json:"client_credentials.use_refresh_token"`
+	BackchannelLogoutUrl                     string                           `json:"backchannel.logout.url"`
+	FrontchannelLogoutUrl                    string                           `json:"frontchannel.logout.url"`
+	BackchannelLogoutRevokeOfflineTokens     types.KeycloakBoolQuoted         `json:"backchannel.logout.revoke.offline.tokens"`
+	BackchannelLogoutSessionRequired         types.KeycloakBoolQuoted         `json:"backchannel.logout.session.required"`
+	ExtraConfig                              map[string]interface{}           `json:"-"`
+	Oauth2DeviceAuthorizationGrantEnabled    types.KeycloakBoolQuoted         `json:"oauth2.device.authorization.grant.enabled"`
+	Oauth2DeviceCodeLifespan                 string                           `json:"oauth2.device.code.lifespan,omitempty"`
+	Oauth2DevicePollingInterval              string                           `json:"oauth2.device.polling.interval,omitempty"`
+	PostLogoutRedirectUris                   types.KeycloakSliceHashDelimited `json:"post.logout.redirect.uris,omitempty"`
+	StandardTokenExchangeEnabled             types.KeycloakBoolQuoted         `json:"standard.token.exchange.enabled,omitempty"`
+	AllowRefreshTokenInStandardTokenExchange string                           `json:"standard.token.exchange.enableRefreshRequestedTokenType,omitempty"`
 }
 
 type OpenidAuthenticationFlowBindingOverrides struct {
@@ -120,6 +126,10 @@ func (keycloakClient *KeycloakClient) ValidateOpenidClient(ctx context.Context, 
 
 	if client.Attributes.LoginTheme != "" && !serverInfo.ThemeIsInstalled("login", client.Attributes.LoginTheme) {
 		return fmt.Errorf("validation error: theme \"%s\" does not exist on the server", client.Attributes.LoginTheme)
+	}
+
+	if client.Attributes.StandardTokenExchangeEnabled == true && client.PublicClient {
+		return fmt.Errorf("validation error: standard token exchange cannot be enabled on public clients")
 	}
 
 	return nil
@@ -256,25 +266,6 @@ func (keycloakClient *KeycloakClient) GetOpenidClientOptionalScopes(ctx context.
 	return keycloakClient.getOpenidClientScopes(ctx, realmId, clientId, "optional")
 }
 
-func (keycloakClient *KeycloakClient) getRealmClientScopes(ctx context.Context, realmId, t string) ([]*OpenidClientScope, error) {
-	var scopes []*OpenidClientScope
-
-	err := keycloakClient.get(ctx, fmt.Sprintf("/realms/%s/default-%s-client-scopes", realmId, t), &scopes, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return scopes, nil
-}
-
-func (keycloakClient *KeycloakClient) GetRealmDefaultClientScopes(ctx context.Context, realmId string) ([]*OpenidClientScope, error) {
-	return keycloakClient.getRealmClientScopes(ctx, realmId, "default")
-}
-
-func (keycloakClient *KeycloakClient) GetRealmOptionalClientScopes(ctx context.Context, realmId string) ([]*OpenidClientScope, error) {
-	return keycloakClient.getRealmClientScopes(ctx, realmId, "optional")
-}
-
 func (keycloakClient *KeycloakClient) attachOpenidClientScopes(ctx context.Context, realmId, clientId, t string, scopeNames []string) error {
 	openidClient, err := keycloakClient.GetOpenidClient(ctx, realmId, clientId)
 	if err != nil && ErrorIs404(err) {
@@ -325,6 +316,20 @@ func (keycloakClient *KeycloakClient) attachOpenidClientScopes(ctx context.Conte
 	}
 
 	return nil
+}
+
+func (keycloakClient *KeycloakClient) RegenerateOpenIdClientSecret(ctx context.Context, client *OpenidClient) (*OpenidClientSecret, error) {
+	body, _, err := keycloakClient.post(ctx, fmt.Sprintf("/realms/%s/clients/%s/client-secret", client.RealmId, client.Id), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var clientSecret OpenidClientSecret
+	if err := json.Unmarshal(body, &clientSecret); err != nil {
+		return nil, err
+	}
+
+	return &clientSecret, nil
 }
 
 func (keycloakClient *KeycloakClient) AttachOpenidClientDefaultScopes(ctx context.Context, realmId, clientId string, scopeNames []string) error {

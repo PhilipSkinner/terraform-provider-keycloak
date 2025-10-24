@@ -3,7 +3,7 @@ package keycloak
 import (
 	"context"
 	"fmt"
-	"github.com/mrparkers/terraform-provider-keycloak/keycloak/types"
+	"github.com/keycloak/terraform-provider-keycloak/keycloak/types"
 	"strings"
 )
 
@@ -23,12 +23,13 @@ type Keys struct {
 }
 
 type Realm struct {
-	Id                string `json:"id,omitempty"`
-	Realm             string `json:"realm"`
-	Enabled           bool   `json:"enabled"`
-	DisplayName       string `json:"displayName"`
-	DisplayNameHtml   string `json:"displayNameHtml"`
-	UserManagedAccess bool   `json:"userManagedAccessAllowed"`
+	Id                   string `json:"id,omitempty"`
+	Realm                string `json:"realm"`
+	Enabled              bool   `json:"enabled"`
+	DisplayName          string `json:"displayName"`
+	DisplayNameHtml      string `json:"displayNameHtml"`
+	UserManagedAccess    bool   `json:"userManagedAccessAllowed"`
+	OrganizationsEnabled bool   `json:"organizationsEnabled,omitempty"`
 
 	// Login Config
 	RegistrationAllowed         bool   `json:"registrationAllowed"`
@@ -105,6 +106,7 @@ type Realm struct {
 	ResetCredentialsFlow     *string `json:"resetCredentialsFlow,omitempty"`
 	ClientAuthenticationFlow *string `json:"clientAuthenticationFlow,omitempty"`
 	DockerAuthenticationFlow *string `json:"dockerAuthenticationFlow,omitempty"`
+	FirstBrokerLoginFlow     *string `json:"firstBrokerLoginFlow,omitempty"`
 
 	// OTP Policy
 	OTPPolicyAlgorithm       string `json:"otpPolicyAlgorithm,omitempty"`
@@ -116,6 +118,7 @@ type Realm struct {
 
 	// WebAuthn
 	WebAuthnPolicyAcceptableAaguids               []string `json:"webAuthnPolicyAcceptableAaguids"`
+	WebAuthnPolicyExtraOrigins                    []string `json:"webAuthnPolicyExtraOrigins,omitempty"`
 	WebAuthnPolicyAttestationConveyancePreference string   `json:"webAuthnPolicyAttestationConveyancePreference"`
 	WebAuthnPolicyAuthenticatorAttachment         string   `json:"webAuthnPolicyAuthenticatorAttachment"`
 	WebAuthnPolicyAvoidSameAuthenticatorRegister  bool     `json:"webAuthnPolicyAvoidSameAuthenticatorRegister"`
@@ -128,6 +131,7 @@ type Realm struct {
 
 	// WebAuthn Passwordless
 	WebAuthnPolicyPasswordlessAcceptableAaguids               []string `json:"webAuthnPolicyPasswordlessAcceptableAaguids"`
+	WebAuthnPolicyPasswordlessExtraOrigins                    []string `json:"webAuthnPolicyPasswordlessExtraOrigins,omitempty"`
 	WebAuthnPolicyPasswordlessAttestationConveyancePreference string   `json:"webAuthnPolicyPasswordlessAttestationConveyancePreference"`
 	WebAuthnPolicyPasswordlessAuthenticatorAttachment         string   `json:"webAuthnPolicyPasswordlessAuthenticatorAttachment"`
 	WebAuthnPolicyPasswordlessAvoidSameAuthenticatorRegister  bool     `json:"webAuthnPolicyPasswordlessAvoidSameAuthenticatorRegister"`
@@ -154,18 +158,23 @@ type BrowserSecurityHeaders struct {
 }
 
 type SmtpServer struct {
-	StartTls           types.KeycloakBoolQuoted `json:"starttls,omitempty"`
-	Auth               types.KeycloakBoolQuoted `json:"auth,omitempty"`
-	Port               string                   `json:"port,omitempty"`
-	Host               string                   `json:"host,omitempty"`
-	ReplyTo            string                   `json:"replyTo,omitempty"`
-	ReplyToDisplayName string                   `json:"replyToDisplayName,omitempty"`
-	From               string                   `json:"from,omitempty"`
-	FromDisplayName    string                   `json:"fromDisplayName,omitempty"`
-	EnvelopeFrom       string                   `json:"envelopeFrom,omitempty"`
-	Ssl                types.KeycloakBoolQuoted `json:"ssl,omitempty"`
-	User               string                   `json:"user,omitempty"`
-	Password           string                   `json:"password,omitempty"`
+	StartTls              types.KeycloakBoolQuoted `json:"starttls,omitempty"`
+	Auth                  types.KeycloakBoolQuoted `json:"auth,omitempty"`
+	Port                  string                   `json:"port,omitempty"`
+	Host                  string                   `json:"host,omitempty"`
+	ReplyTo               string                   `json:"replyTo,omitempty"`
+	ReplyToDisplayName    string                   `json:"replyToDisplayName,omitempty"`
+	From                  string                   `json:"from,omitempty"`
+	FromDisplayName       string                   `json:"fromDisplayName,omitempty"`
+	EnvelopeFrom          string                   `json:"envelopeFrom,omitempty"`
+	Ssl                   types.KeycloakBoolQuoted `json:"ssl,omitempty"`
+	User                  string                   `json:"user,omitempty"`
+	Password              string                   `json:"password,omitempty"`
+	AuthType              string                   `json:"authType,omitempty"`
+	AuthTokenUrl          string                   `json:"authTokenUrl,omitempty"`
+	AuthTokenClientId     string                   `json:"authTokenClientId,omitempty"`
+	AuthTokenClientSecret string                   `json:"authTokenClientSecret,omitempty"`
+	AuthTokenScope        string                   `json:"authTokenScope,omitempty"`
 }
 
 func (keycloakClient *KeycloakClient) NewRealm(ctx context.Context, realm *Realm) error {

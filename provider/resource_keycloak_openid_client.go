@@ -4,17 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/imdario/mergo"
-	"github.com/mrparkers/terraform-provider-keycloak/keycloak/types"
 	"reflect"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/go-cty/cty"
 
+	"dario.cat/mergo"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/customdiff"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
-	"github.com/mrparkers/terraform-provider-keycloak/keycloak"
+	"github.com/keycloak/terraform-provider-keycloak/keycloak"
+	"github.com/keycloak/terraform-provider-keycloak/keycloak/types"
 )
 
 var (
@@ -65,10 +66,36 @@ func resourceKeycloakOpenidClient() *schema.Resource {
 				ValidateFunc: validation.StringInSlice(keycloakOpenidClientAccessTypes, false),
 			},
 			"client_secret": {
-				Type:      schema.TypeString,
-				Optional:  true,
-				Computed:  true,
-				Sensitive: true,
+				Type:          schema.TypeString,
+				Optional:      true,
+				Computed:      true,
+				Sensitive:     true,
+				ConflictsWith: []string{"client_secret_wo", "client_secret_wo_version", "client_secret_regenerate_when_changed"},
+			},
+			"client_secret_wo": {
+				Type:          schema.TypeString,
+				Optional:      true,
+				Sensitive:     true,
+				WriteOnly:     true,
+				ConflictsWith: []string{"client_secret", "client_secret_regenerate_when_changed"},
+				RequiredWith:  []string{"client_secret_wo_version"},
+				Description:   "Client Secret as write-only argument",
+			},
+			"client_secret_wo_version": {
+				Type:          schema.TypeInt,
+				Optional:      true,
+				ConflictsWith: []string{"client_secret", "client_secret_regenerate_when_changed"},
+				RequiredWith:  []string{"client_secret_wo"},
+				Description:   "Version of the Client secret write-only argument",
+			},
+			"client_secret_regenerate_when_changed": {
+				Type:          schema.TypeMap,
+				Description:   "Arbitrary map of values that, when changed, will trigger rotation of the secret",
+				Optional:      true,
+				ConflictsWith: []string{"client_secret", "client_secret_wo", "client_secret_wo_version"},
+				Elem: &schema.Schema{
+					Type: schema.TypeString,
+				},
 			},
 			"client_authenticator_type": {
 				Type:     schema.TypeString,
@@ -176,6 +203,11 @@ func resourceKeycloakOpenidClient() *schema.Resource {
 				Optional: true,
 				Computed: true,
 			},
+			"exclude_issuer_from_auth_response": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Computed: true,
+			},
 			"resource_server_id": {
 				Type:     schema.TypeString,
 				Computed: true,
@@ -261,6 +293,15 @@ func resourceKeycloakOpenidClient() *schema.Resource {
 				Optional: true,
 				Default:  false,
 			},
+			"standard_token_exchange_enabled": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  false,
+			},
+			"allow_refresh_token_in_standard_token_exchange": {
+				Type:     schema.TypeString,
+				Optional: true,
+			},
 			"frontchannel_logout_url": {
 				Type:     schema.TypeString,
 				Optional: true,
@@ -296,6 +337,11 @@ func resourceKeycloakOpenidClient() *schema.Resource {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
+			"always_display_in_console": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  false,
+			},
 			"import": {
 				Type:     schema.TypeBool,
 				Optional: true,
@@ -303,10 +349,19 @@ func resourceKeycloakOpenidClient() *schema.Resource {
 				ForceNew: true,
 			},
 		},
-		CustomizeDiff: customdiff.ComputedIf("service_account_user_id", func(ctx context.Context, d *schema.ResourceDiff, meta interface{}) bool {
+		CustomizeDiff: resourceKeycloakOpenidClientDiff(),
+	}
+}
+
+func resourceKeycloakOpenidClientDiff() schema.CustomizeDiffFunc {
+	return customdiff.All(
+		customdiff.ComputedIf("service_account_user_id", func(ctx context.Context, d *schema.ResourceDiff, meta interface{}) bool {
 			return d.HasChange("service_accounts_enabled")
 		}),
-	}
+		customdiff.ComputedIf("client_secret", func(ctx context.Context, d *schema.ResourceDiff, meta interface{}) bool {
+			return d.HasChange("client_secret_regenerate_when_changed")
+		}),
+	)
 }
 
 func getOpenidClientFromData(data *schema.ResourceData) (*keycloak.OpenidClient, error) {
@@ -355,33 +410,46 @@ func getOpenidClientFromData(data *schema.ResourceData) (*keycloak.OpenidClient,
 		FrontChannelLogoutEnabled: data.Get("frontchannel_logout_enabled").(bool),
 		FullScopeAllowed:          data.Get("full_scope_allowed").(bool),
 		Attributes: keycloak.OpenidClientAttributes{
-			PkceCodeChallengeMethod:               data.Get("pkce_code_challenge_method").(string),
-			ExcludeSessionStateFromAuthResponse:   types.KeycloakBoolQuoted(data.Get("exclude_session_state_from_auth_response").(bool)),
-			AccessTokenLifespan:                   data.Get("access_token_lifespan").(string),
-			LoginTheme:                            data.Get("login_theme").(string),
-			ClientOfflineSessionIdleTimeout:       data.Get("client_offline_session_idle_timeout").(string),
-			ClientOfflineSessionMaxLifespan:       data.Get("client_offline_session_max_lifespan").(string),
-			ClientSessionIdleTimeout:              data.Get("client_session_idle_timeout").(string),
-			ClientSessionMaxLifespan:              data.Get("client_session_max_lifespan").(string),
-			UseRefreshTokens:                      types.KeycloakBoolQuoted(data.Get("use_refresh_tokens").(bool)),
-			UseRefreshTokensClientCredentials:     types.KeycloakBoolQuoted(data.Get("use_refresh_tokens_client_credentials").(bool)),
-			FrontchannelLogoutUrl:                 data.Get("frontchannel_logout_url").(string),
-			BackchannelLogoutUrl:                  data.Get("backchannel_logout_url").(string),
-			BackchannelLogoutRevokeOfflineTokens:  types.KeycloakBoolQuoted(data.Get("backchannel_logout_revoke_offline_sessions").(bool)),
-			BackchannelLogoutSessionRequired:      types.KeycloakBoolQuoted(data.Get("backchannel_logout_session_required").(bool)),
-			ExtraConfig:                           getExtraConfigFromData(data),
-			Oauth2DeviceAuthorizationGrantEnabled: types.KeycloakBoolQuoted(data.Get("oauth2_device_authorization_grant_enabled").(bool)),
-			Oauth2DeviceCodeLifespan:              data.Get("oauth2_device_code_lifespan").(string),
-			Oauth2DevicePollingInterval:           data.Get("oauth2_device_polling_interval").(string),
-			ConsentScreenText:                     data.Get("consent_screen_text").(string),
-			DisplayOnConsentScreen:                types.KeycloakBoolQuoted(data.Get("display_on_consent_screen").(bool)),
-			PostLogoutRedirectUris:                types.KeycloakSliceHashDelimited(validPostLogoutRedirectUris),
+			PkceCodeChallengeMethod:                  data.Get("pkce_code_challenge_method").(string),
+			ExcludeSessionStateFromAuthResponse:      types.KeycloakBoolQuoted(data.Get("exclude_session_state_from_auth_response").(bool)),
+			ExcludeIssuerFromAuthResponse:            types.KeycloakBoolQuoted(data.Get("exclude_issuer_from_auth_response").(bool)),
+			AccessTokenLifespan:                      data.Get("access_token_lifespan").(string),
+			LoginTheme:                               data.Get("login_theme").(string),
+			ClientOfflineSessionIdleTimeout:          data.Get("client_offline_session_idle_timeout").(string),
+			ClientOfflineSessionMaxLifespan:          data.Get("client_offline_session_max_lifespan").(string),
+			ClientSessionIdleTimeout:                 data.Get("client_session_idle_timeout").(string),
+			ClientSessionMaxLifespan:                 data.Get("client_session_max_lifespan").(string),
+			UseRefreshTokens:                         types.KeycloakBoolQuoted(data.Get("use_refresh_tokens").(bool)),
+			UseRefreshTokensClientCredentials:        types.KeycloakBoolQuoted(data.Get("use_refresh_tokens_client_credentials").(bool)),
+			StandardTokenExchangeEnabled:             types.KeycloakBoolQuoted(data.Get("standard_token_exchange_enabled").(bool)),
+			AllowRefreshTokenInStandardTokenExchange: data.Get("allow_refresh_token_in_standard_token_exchange").(string),
+			FrontchannelLogoutUrl:                    data.Get("frontchannel_logout_url").(string),
+			BackchannelLogoutUrl:                     data.Get("backchannel_logout_url").(string),
+			BackchannelLogoutRevokeOfflineTokens:     types.KeycloakBoolQuoted(data.Get("backchannel_logout_revoke_offline_sessions").(bool)),
+			BackchannelLogoutSessionRequired:         types.KeycloakBoolQuoted(data.Get("backchannel_logout_session_required").(bool)),
+			ExtraConfig:                              getExtraConfigFromData(data),
+			Oauth2DeviceAuthorizationGrantEnabled:    types.KeycloakBoolQuoted(data.Get("oauth2_device_authorization_grant_enabled").(bool)),
+			Oauth2DeviceCodeLifespan:                 data.Get("oauth2_device_code_lifespan").(string),
+			Oauth2DevicePollingInterval:              data.Get("oauth2_device_polling_interval").(string),
+			ConsentScreenText:                        data.Get("consent_screen_text").(string),
+			DisplayOnConsentScreen:                   types.KeycloakBoolQuoted(data.Get("display_on_consent_screen").(bool)),
+			PostLogoutRedirectUris:                   types.KeycloakSliceHashDelimited(validPostLogoutRedirectUris),
 		},
-		ValidRedirectUris: validRedirectUris,
-		WebOrigins:        webOrigins,
-		AdminUrl:          data.Get("admin_url").(string),
-		BaseUrl:           data.Get("base_url").(string),
-		ConsentRequired:   data.Get("consent_required").(bool),
+		ValidRedirectUris:      validRedirectUris,
+		WebOrigins:             webOrigins,
+		AdminUrl:               data.Get("admin_url").(string),
+		BaseUrl:                data.Get("base_url").(string),
+		ConsentRequired:        data.Get("consent_required").(bool),
+		AlwaysDisplayInConsole: data.Get("always_display_in_console").(bool),
+	}
+
+	if data.Get("client_secret_wo_version").(int) != 0 && data.HasChange("client_secret_wo_version") {
+		clientSecretWriteOnly, clientSecretWriteOnlyDiags := data.GetRawConfigAt(cty.GetAttrPath("client_secret_wo"))
+		if clientSecretWriteOnlyDiags.HasError() {
+			return nil, errors.New("error reading 'client_secret_wo' argument")
+		}
+
+		openidClient.ClientSecret = clientSecretWriteOnly.AsString()
 	}
 
 	if rootUrlOk {
@@ -448,7 +516,6 @@ func setOpenidClientData(ctx context.Context, keycloakClient *keycloak.KeycloakC
 	data.Set("name", client.Name)
 	data.Set("enabled", client.Enabled)
 	data.Set("description", client.Description)
-	data.Set("client_secret", client.ClientSecret)
 	data.Set("client_authenticator_type", client.ClientAuthenticatorType)
 	data.Set("standard_flow_enabled", client.StandardFlowEnabled)
 	data.Set("implicit_flow_enabled", client.ImplicitFlowEnabled)
@@ -463,11 +530,14 @@ func setOpenidClientData(ctx context.Context, keycloakClient *keycloak.KeycloakC
 	data.Set("root_url", &client.RootUrl)
 	data.Set("full_scope_allowed", client.FullScopeAllowed)
 	data.Set("consent_required", client.ConsentRequired)
+	data.Set("always_display_in_console", client.AlwaysDisplayInConsole)
 
 	data.Set("access_token_lifespan", client.Attributes.AccessTokenLifespan)
 	data.Set("login_theme", client.Attributes.LoginTheme)
 	data.Set("use_refresh_tokens", client.Attributes.UseRefreshTokens)
 	data.Set("use_refresh_tokens_client_credentials", client.Attributes.UseRefreshTokensClientCredentials)
+	data.Set("standard_token_exchange_enabled", client.Attributes.StandardTokenExchangeEnabled)
+	data.Set("allow_refresh_token_in_standard_token_exchange", client.Attributes.AllowRefreshTokenInStandardTokenExchange)
 	data.Set("oauth2_device_authorization_grant_enabled", client.Attributes.Oauth2DeviceAuthorizationGrantEnabled)
 	data.Set("oauth2_device_code_lifespan", client.Attributes.Oauth2DeviceCodeLifespan)
 	data.Set("oauth2_device_polling_interval", client.Attributes.Oauth2DevicePollingInterval)
@@ -493,7 +563,13 @@ func setOpenidClientData(ctx context.Context, keycloakClient *keycloak.KeycloakC
 		data.Set("service_account_user_id", "")
 	}
 
-	// access type
+	if v, ok := data.GetOk("client_secret_wo_version"); ok && v != nil {
+		data.Set("client_secret_wo_version", v.(int))
+	} else {
+		data.Set("client_secret", client.ClientSecret)
+	}
+
+	// access typess
 	if client.PublicClient {
 		data.Set("access_type", "PUBLIC")
 	} else if client.BearerOnly {
@@ -572,6 +648,10 @@ func resourceKeycloakOpenidClientRead(ctx context.Context, data *schema.Resource
 		return diag.FromErr(err)
 	}
 
+	if _, ok := data.GetOk("import"); !ok {
+		data.Set("import", false)
+	}
+
 	return nil
 }
 
@@ -584,6 +664,11 @@ func resourceKeycloakOpenidClientUpdate(ctx context.Context, data *schema.Resour
 	}
 
 	err = keycloakClient.ValidateOpenidClient(ctx, client)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	err = evaluateSecretRegeneration(ctx, keycloakClient, data, client)
 	if err != nil {
 		return diag.FromErr(err)
 	}
@@ -636,4 +721,19 @@ func resourceKeycloakOpenidClientImport(ctx context.Context, d *schema.ResourceD
 	}
 
 	return []*schema.ResourceData{d}, nil
+}
+
+func evaluateSecretRegeneration(ctx context.Context, keycloakClient *keycloak.KeycloakClient, d *schema.ResourceData, client *keycloak.OpenidClient) error {
+
+	if d.HasChange("client_secret_regenerate_when_changed") {
+		secret, err := keycloakClient.RegenerateOpenIdClientSecret(ctx, client)
+		if err != nil {
+			return err
+		}
+
+		client.ClientSecret = secret.Value
+		d.Set("client_secret", secret.Value)
+	}
+
+	return nil
 }

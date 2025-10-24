@@ -2,7 +2,7 @@ package provider
 
 import (
 	"fmt"
-	"github.com/mrparkers/terraform-provider-keycloak/keycloak/types"
+	"github.com/keycloak/terraform-provider-keycloak/keycloak/types"
 	"regexp"
 	"strings"
 	"testing"
@@ -10,7 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
-	"github.com/mrparkers/terraform-provider-keycloak/keycloak"
+	"github.com/keycloak/terraform-provider-keycloak/keycloak"
 )
 
 func TestAccKeycloakSamlClient_basic(t *testing.T) {
@@ -144,12 +144,12 @@ func TestAccKeycloakSamlClient_updateInPlace(t *testing.T) {
 
 		RootUrl: "http://localhost:2222/" + acctest.RandString(20),
 		ValidRedirectUris: []string{
-			acctest.RandString(20),
-			acctest.RandString(20),
-			acctest.RandString(20),
+			"http://localhost:2222/" + acctest.RandString(20),
+			"http://localhost:2222/" + acctest.RandString(20),
+			"http://localhost:2222/" + acctest.RandString(20),
 		},
 		BaseUrl:                 "http://localhost:2222/" + acctest.RandString(20),
-		MasterSamlProcessingUrl: acctest.RandString(20),
+		MasterSamlProcessingUrl: "http://localhost:2222/" + acctest.RandString(20),
 
 		Attributes: &keycloak.SamlClientAttributes{
 			IncludeAuthnStatement:           types.KeycloakBoolQuoted(randomBool()),
@@ -167,10 +167,10 @@ func TestAccKeycloakSamlClient_updateInPlace(t *testing.T) {
 			SigningPrivateKey:               signingPrivateKeyBefore,
 			IDPInitiatedSSOURLName:          acctest.RandString(20),
 			IDPInitiatedSSORelayState:       acctest.RandString(20),
-			AssertionConsumerPostURL:        acctest.RandString(20),
-			AssertionConsumerRedirectURL:    acctest.RandString(20),
-			LogoutServicePostBindingURL:     acctest.RandString(20),
-			LogoutServiceRedirectBindingURL: acctest.RandString(20),
+			AssertionConsumerPostURL:        "http://localhost:2222/" + acctest.RandString(20),
+			AssertionConsumerRedirectURL:    "http://localhost:2222/" + acctest.RandString(20),
+			LogoutServicePostBindingURL:     "http://localhost:2222/" + acctest.RandString(20),
+			LogoutServiceRedirectBindingURL: "http://localhost:2222/" + acctest.RandString(20),
 			LoginTheme:                      "keycloak",
 		},
 	}
@@ -187,10 +187,10 @@ func TestAccKeycloakSamlClient_updateInPlace(t *testing.T) {
 
 		RootUrl: "http://localhost:2222/" + acctest.RandString(20),
 		ValidRedirectUris: []string{
-			acctest.RandString(20),
+			"http://localhost:2222/" + acctest.RandString(20),
 		},
 		BaseUrl:                 "http://localhost:2222/" + acctest.RandString(20),
-		MasterSamlProcessingUrl: acctest.RandString(20),
+		MasterSamlProcessingUrl: "http://localhost:2222/" + acctest.RandString(20),
 
 		Attributes: &keycloak.SamlClientAttributes{
 			IncludeAuthnStatement:           types.KeycloakBoolQuoted(randomBool()),
@@ -208,10 +208,10 @@ func TestAccKeycloakSamlClient_updateInPlace(t *testing.T) {
 			SigningPrivateKey:               signingPrivateKeyAfter,
 			IDPInitiatedSSOURLName:          acctest.RandString(20),
 			IDPInitiatedSSORelayState:       acctest.RandString(20),
-			AssertionConsumerPostURL:        acctest.RandString(20),
-			AssertionConsumerRedirectURL:    acctest.RandString(20),
-			LogoutServicePostBindingURL:     acctest.RandString(20),
-			LogoutServiceRedirectBindingURL: acctest.RandString(20),
+			AssertionConsumerPostURL:        "http://localhost:2222/" + acctest.RandString(20),
+			AssertionConsumerRedirectURL:    "http://localhost:2222/" + acctest.RandString(20),
+			LogoutServicePostBindingURL:     "http://localhost:2222/" + acctest.RandString(20),
+			LogoutServiceRedirectBindingURL: "http://localhost:2222/" + acctest.RandString(20),
 			LoginTheme:                      "keycloak",
 		},
 	}
@@ -714,8 +714,8 @@ resource "keycloak_saml_client" "saml_client" {
 	encrypt_assertions      = false
 	include_authn_statement = true
 
-	signing_certificate     = file("misc/saml-cert.pem")
-	signing_private_key     = file("misc/saml-key.pem")
+	signing_certificate     = file("testdata/saml-cert.pem")
+	signing_private_key     = file("testdata/saml-key.pem")
 }
 	`, testAccRealm.Realm, clientId)
 }
@@ -736,7 +736,7 @@ resource "keycloak_saml_client" "saml_client" {
 	encrypt_assertions      = false
 	include_authn_statement = true
 
-	signing_certificate     = file("misc/saml-cert.pem")
+	signing_certificate     = file("testdata/saml-cert.pem")
 }
 	`, testAccRealm.Realm, clientId)
 }
@@ -755,7 +755,7 @@ resource "keycloak_saml_client" "saml_client" {
 	encrypt_assertions      = true
 	include_authn_statement = true
 
-	encryption_certificate     = file("misc/saml-cert.pem")
+	encryption_certificate     = file("testdata/saml-cert.pem")
 }
 	`, testAccRealm.Realm, clientId)
 }

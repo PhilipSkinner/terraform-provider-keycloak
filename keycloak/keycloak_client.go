@@ -7,8 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"github.com/hashicorp/terraform-plugin-log/tflog"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -17,7 +16,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/go-version"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"golang.org/x/net/publicsuffix"
 
@@ -25,32 +28,37 @@ import (
 )
 
 type KeycloakClient struct {
-	baseUrl           string
-	realm             string
-	clientCredentials *ClientCredentials
-	httpClient        *http.Client
-	initialLogin      bool
-	userAgent         string
-	version           *version.Version
-	additionalHeaders map[string]string
-	debug             bool
-	redHatSSO         bool
+	baseUrl             string
+	authUrl             string
+	realm               string
+	clientCredentials   *ClientCredentials
+	httpClient          *http.Client
+	initialLogin        bool
+	userAgent           string
+	version             *version.Version
+	additionalHeaders   map[string]string
+	debug               bool
+	redHatSSO           bool
+	accessTokenProvided bool
 }
 
 type ClientCredentials struct {
-	ClientId     string
-	ClientSecret string
-	Username     string
-	Password     string
-	GrantType    string
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	TokenType    string `json:"token_type"`
+	ClientId      string
+	ClientSecret  string
+	JWTSigningKey string
+	JWTSigningAlg string
+	Username      string
+	Password      string
+	GrantType     string
+	AccessToken   string `json:"access_token"`
+	RefreshToken  string `json:"refresh_token"`
+	TokenType     string `json:"token_type"`
 }
 
 const (
-	apiUrl   = "/admin"
-	tokenUrl = "%s/realms/%s/protocol/openid-connect/token"
+	apiUrl    = "/admin"
+	issuerUrl = "%s/realms/%s"
+	tokenUrl  = "%s/realms/%s/protocol/openid-connect/token"
 )
 
 // https://access.redhat.com/articles/2342881
@@ -60,105 +68,127 @@ var redHatSSO7VersionMap = map[int]string{
 	4: "9.0.17",
 }
 
-func NewKeycloakClient(ctx context.Context, url, basePath, clientId, clientSecret, realm, username, password string, initialLogin bool, clientTimeout int, caCert string, tlsInsecureSkipVerify bool, userAgent string, redHatSSO bool, additionalHeaders map[string]string) (*KeycloakClient, error) {
+func NewKeycloakClient(ctx context.Context, url, basePath, adminUrl, clientId, clientSecret, realm, username, password, accessToken, jwtSigningAlg, jwtSigningKey string, initialLogin bool, clientTimeout int, caCert string, tlsInsecureSkipVerify bool, tlsClientCert string, tlsClientPrivateKey string, userAgent string, redHatSSO bool, additionalHeaders map[string]string) (*KeycloakClient, error) {
 	clientCredentials := &ClientCredentials{
-		ClientId:     clientId,
-		ClientSecret: clientSecret,
+		ClientId:      clientId,
+		ClientSecret:  clientSecret,
+		JWTSigningKey: jwtSigningKey,
+		JWTSigningAlg: jwtSigningAlg,
 	}
+
 	if password != "" && username != "" {
 		clientCredentials.Username = username
 		clientCredentials.Password = password
 		clientCredentials.GrantType = "password"
-	} else if clientSecret != "" {
+	} else if clientSecret != "" || jwtSigningKey != "" {
 		clientCredentials.GrantType = "client_credentials"
+	} else if accessToken != "" {
+		clientCredentials.AccessToken = accessToken
+		clientCredentials.TokenType = "bearer"
 	} else {
 		if initialLogin {
-			return nil, fmt.Errorf("must specify client id, username and password for password grant, or client id and secret for client credentials grant")
+			return nil, fmt.Errorf("must specify client id, username and password for password grant, either client id and client secret or JWT Signing Key for client credentials grant")
 		} else {
 			tflog.Warn(ctx, "missing required keycloak credentials, but proceeding anyways as initial_login is false")
 		}
 	}
 
-	httpClient, err := newHttpClient(tlsInsecureSkipVerify, clientTimeout, caCert)
+	httpClient, err := newHttpClient(tlsInsecureSkipVerify, clientTimeout, caCert, tlsClientCert, tlsClientPrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create http client: %v", err)
 	}
 
-	keycloakClient := KeycloakClient{
-		baseUrl:           url + basePath,
-		clientCredentials: clientCredentials,
-		httpClient:        httpClient,
-		initialLogin:      initialLogin,
-		realm:             realm,
-		userAgent:         userAgent,
-		redHatSSO:         redHatSSO,
-		additionalHeaders: additionalHeaders,
+	authUrl := url + basePath
+	baseUrl := authUrl
+	if adminUrl != "" {
+		baseUrl = adminUrl + basePath
 	}
 
-	if keycloakClient.initialLogin {
+	keycloakClient := KeycloakClient{
+		baseUrl:             baseUrl,
+		authUrl:             authUrl,
+		clientCredentials:   clientCredentials,
+		httpClient:          httpClient,
+		initialLogin:        initialLogin,
+		realm:               realm,
+		userAgent:           userAgent,
+		redHatSSO:           redHatSSO,
+		additionalHeaders:   additionalHeaders,
+		accessTokenProvided: accessToken != "",
+	}
+
+	if accessToken == "" && keycloakClient.initialLogin {
 		err = keycloakClient.login(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to perform initial login to Keycloak: %v", err)
 		}
 	}
 
-	if tfLog, ok := os.LookupEnv("TF_LOG"); ok {
-		if tfLog == "DEBUG" {
-			keycloakClient.debug = true
-		}
+	if tfLog, ok := os.LookupEnv("TF_LOG"); ok && tfLog == "DEBUG" {
+		keycloakClient.debug = true
 	}
 
 	return &keycloakClient, nil
 }
 
 func (keycloakClient *KeycloakClient) login(ctx context.Context) error {
-	accessTokenUrl := fmt.Sprintf(tokenUrl, keycloakClient.baseUrl, keycloakClient.realm)
-	accessTokenData := keycloakClient.getAuthenticationFormData()
 
-	tflog.Debug(ctx, "Login request", map[string]interface{}{
-		"request": accessTokenData.Encode(),
-	})
+	if !keycloakClient.accessTokenProvided {
+		accessTokenUrl := fmt.Sprintf(tokenUrl, keycloakClient.authUrl, keycloakClient.realm)
+		accessTokenData, err := keycloakClient.getAuthenticationFormData(ctx, accessTokenUrl)
+		if err != nil {
+			return err
+		}
 
-	accessTokenRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, accessTokenUrl, strings.NewReader(accessTokenData.Encode()))
-	if err != nil {
-		return err
+		tflog.Debug(ctx, "Login request", map[string]interface{}{
+			"request": accessTokenData.Encode(),
+		})
+
+		accessTokenRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, accessTokenUrl, strings.NewReader(accessTokenData.Encode()))
+		if err != nil {
+			return err
+		}
+
+		for header, value := range keycloakClient.additionalHeaders {
+			accessTokenRequest.Header.Set(header, value)
+		}
+
+		accessTokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		if keycloakClient.userAgent != "" {
+			accessTokenRequest.Header.Set("User-Agent", keycloakClient.userAgent)
+		}
+
+		accessTokenResponse, err := keycloakClient.httpClient.Do(accessTokenRequest)
+		if err != nil {
+			return err
+		}
+		if accessTokenResponse.StatusCode != http.StatusOK {
+			return fmt.Errorf("error sending POST request to %s: %s", accessTokenUrl, accessTokenResponse.Status)
+		}
+
+		defer accessTokenResponse.Body.Close()
+
+		body, _ := io.ReadAll(accessTokenResponse.Body)
+
+		tflog.Debug(ctx, "Login response", map[string]interface{}{
+			"response": string(body),
+		})
+
+		var clientCredentials ClientCredentials
+		err = json.Unmarshal(body, &clientCredentials)
+		if err != nil {
+			return err
+		}
+
+		keycloakClient.clientCredentials.AccessToken = clientCredentials.AccessToken
+		keycloakClient.clientCredentials.RefreshToken = clientCredentials.RefreshToken
+		keycloakClient.clientCredentials.TokenType = clientCredentials.TokenType
+	} else {
+		tflog.Debug(ctx, "Using provided access_token", map[string]interface{}{
+			"access_token": keycloakClient.clientCredentials.AccessToken,
+		})
 	}
-
-	for header, value := range keycloakClient.additionalHeaders {
-		accessTokenRequest.Header.Set(header, value)
-	}
-
-	accessTokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	if keycloakClient.userAgent != "" {
-		accessTokenRequest.Header.Set("User-Agent", keycloakClient.userAgent)
-	}
-
-	accessTokenResponse, err := keycloakClient.httpClient.Do(accessTokenRequest)
-	if err != nil {
-		return err
-	}
-	if accessTokenResponse.StatusCode != http.StatusOK {
-		return fmt.Errorf("error sending POST request to %s: %s", accessTokenUrl, accessTokenResponse.Status)
-	}
-
-	defer accessTokenResponse.Body.Close()
-
-	body, _ := ioutil.ReadAll(accessTokenResponse.Body)
-
-	tflog.Debug(ctx, "Login response", map[string]interface{}{
-		"response": string(body),
-	})
-
-	var clientCredentials ClientCredentials
-	err = json.Unmarshal(body, &clientCredentials)
-	if err != nil {
-		return err
-	}
-
-	keycloakClient.clientCredentials.AccessToken = clientCredentials.AccessToken
-	keycloakClient.clientCredentials.RefreshToken = clientCredentials.RefreshToken
-	keycloakClient.clientCredentials.TokenType = clientCredentials.TokenType
 
 	info, err := keycloakClient.GetServerInfo(ctx)
 	if err != nil {
@@ -202,9 +232,18 @@ func (keycloakClient *KeycloakClient) login(ctx context.Context) error {
 	return nil
 }
 
-func (keycloakClient *KeycloakClient) refresh(ctx context.Context) error {
-	refreshTokenUrl := fmt.Sprintf(tokenUrl, keycloakClient.baseUrl, keycloakClient.realm)
-	refreshTokenData := keycloakClient.getAuthenticationFormData()
+func (keycloakClient *KeycloakClient) Refresh(ctx context.Context) error {
+
+	if keycloakClient.accessTokenProvided {
+		// If an access_token was provided, we skip refresh
+		return nil
+	}
+
+	refreshTokenUrl := fmt.Sprintf(tokenUrl, keycloakClient.authUrl, keycloakClient.realm)
+	refreshTokenData, err := keycloakClient.getAuthenticationFormData(ctx, refreshTokenUrl)
+	if err != nil {
+		return err
+	}
 
 	tflog.Debug(ctx, "Refresh request", map[string]interface{}{
 		"request": refreshTokenData.Encode(),
@@ -232,7 +271,7 @@ func (keycloakClient *KeycloakClient) refresh(ctx context.Context) error {
 
 	defer refreshTokenResponse.Body.Close()
 
-	body, _ := ioutil.ReadAll(refreshTokenResponse.Body)
+	body, _ := io.ReadAll(refreshTokenResponse.Body)
 
 	tflog.Debug(ctx, "Refresh response", map[string]interface{}{
 		"response": string(body),
@@ -258,7 +297,7 @@ func (keycloakClient *KeycloakClient) refresh(ctx context.Context) error {
 	return nil
 }
 
-func (keycloakClient *KeycloakClient) getAuthenticationFormData() url.Values {
+func (keycloakClient *KeycloakClient) getAuthenticationFormData(ctx context.Context, kc_url string) (url.Values, error) {
 	authenticationFormData := url.Values{}
 	authenticationFormData.Set("client_id", keycloakClient.clientCredentials.ClientId)
 	authenticationFormData.Set("grant_type", keycloakClient.clientCredentials.GrantType)
@@ -272,10 +311,26 @@ func (keycloakClient *KeycloakClient) getAuthenticationFormData() url.Values {
 		}
 
 	} else if keycloakClient.clientCredentials.GrantType == "client_credentials" {
-		authenticationFormData.Set("client_secret", keycloakClient.clientCredentials.ClientSecret)
+		if keycloakClient.clientCredentials.JWTSigningKey != "" {
+			signedJWT, err := newSignedJWT(
+				ctx,
+				fmt.Sprintf(issuerUrl, keycloakClient.baseUrl, keycloakClient.realm),
+				keycloakClient.clientCredentials.ClientId,
+				keycloakClient.clientCredentials.JWTSigningAlg,
+				keycloakClient.clientCredentials.JWTSigningKey,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create signed JWT: %v", err)
+			}
+			authenticationFormData.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+			authenticationFormData.Set("client_assertion", signedJWT)
+		} else {
+			authenticationFormData.Set("client_secret", keycloakClient.clientCredentials.ClientSecret)
+		}
+
 	}
 
-	return authenticationFormData
+	return authenticationFormData, nil
 }
 
 func (keycloakClient *KeycloakClient) addRequestHeaders(request *http.Request) {
@@ -293,7 +348,7 @@ func (keycloakClient *KeycloakClient) addRequestHeaders(request *http.Request) {
 		request.Header.Set("User-Agent", keycloakClient.userAgent)
 	}
 
-	if request.Method == http.MethodPost || request.Method == http.MethodPut || request.Method == http.MethodDelete {
+	if request.Header.Get("Content-type") == "" && (request.Method == http.MethodPost || request.Method == http.MethodPut || request.Method == http.MethodDelete) {
 		request.Header.Set("Content-type", "application/json")
 	}
 }
@@ -320,7 +375,7 @@ func (keycloakClient *KeycloakClient) sendRequest(ctx context.Context, request *
 	}
 
 	if body != nil {
-		request.Body = ioutil.NopCloser(bytes.NewReader(body))
+		request.Body = io.NopCloser(bytes.NewReader(body))
 		requestLogArgs["body"] = string(body)
 	}
 
@@ -332,6 +387,7 @@ func (keycloakClient *KeycloakClient) sendRequest(ctx context.Context, request *
 	if err != nil {
 		return nil, "", fmt.Errorf("error sending request: %v", err)
 	}
+	defer response.Body.Close()
 
 	// Unauthorized: Token could have expired
 	// Forbidden: After creating a realm, following GETs for the realm return 403 until you refresh
@@ -340,7 +396,7 @@ func (keycloakClient *KeycloakClient) sendRequest(ctx context.Context, request *
 			"status": response.Status,
 		})
 
-		err := keycloakClient.refresh(ctx)
+		err := keycloakClient.Refresh(ctx)
 		if err != nil {
 			return nil, "", fmt.Errorf("error refreshing credentials: %s", err)
 		}
@@ -348,17 +404,16 @@ func (keycloakClient *KeycloakClient) sendRequest(ctx context.Context, request *
 		keycloakClient.addRequestHeaders(request)
 
 		if body != nil {
-			request.Body = ioutil.NopCloser(bytes.NewReader(body))
+			request.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		response, err = keycloakClient.httpClient.Do(request)
 		if err != nil {
 			return nil, "", fmt.Errorf("error sending request after refresh: %v", err)
 		}
+		defer response.Body.Close()
 	}
 
-	defer response.Body.Close()
-
-	responseBody, err := ioutil.ReadAll(response.Body)
+	responseBody, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, "", err
 	}
@@ -499,7 +554,31 @@ func (keycloakClient *KeycloakClient) marshal(body interface{}) ([]byte, error) 
 	return json.Marshal(body)
 }
 
-func newHttpClient(tlsInsecureSkipVerify bool, clientTimeout int, caCert string) (*http.Client, error) {
+func RetryPolicy(ctx context.Context, resp *http.Response, err error) (bool, error) {
+	// do retry on context.Canceled or context.DeadlineExceeded
+	if ctx.Err() != nil {
+		return true, ctx.Err()
+	}
+
+	// 429 Too Many Requests is recoverable. Sometimes the server puts
+	// a Retry-After response header to indicate when the server is
+	// available to start processing request from client.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return true, nil
+	}
+
+	// Check the response code. We retry on 500-range responses to allow
+	// the server time to recover, as 500's are typically not permanent
+	// errors and may relate to outages on the server side. This will catch
+	// invalid response codes as well, like 0 and 999.
+	if resp.StatusCode == 0 || (resp.StatusCode >= 500 && resp.StatusCode != http.StatusNotImplemented) {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func newHttpClient(tlsInsecureSkipVerify bool, clientTimeout int, caCert string, tlsClientCert string, tlsClientPrivateKey string) (*http.Client, error) {
 	cookieJar, err := cookiejar.New(&cookiejar.Options{
 		PublicSuffixList: publicsuffix.List,
 	})
@@ -511,6 +590,7 @@ func newHttpClient(tlsInsecureSkipVerify bool, clientTimeout int, caCert string)
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: tlsInsecureSkipVerify},
 		Proxy:           http.ProxyFromEnvironment,
 	}
+	transport.MaxIdleConnsPerHost = 100
 
 	if caCert != "" {
 		caCertPool := x509.NewCertPool()
@@ -518,10 +598,19 @@ func newHttpClient(tlsInsecureSkipVerify bool, clientTimeout int, caCert string)
 		transport.TLSClientConfig.RootCAs = caCertPool
 	}
 
+	if tlsClientCert != "" && tlsClientPrivateKey != "" {
+		clientKeyPairCert, err := tls.X509KeyPair([]byte(tlsClientCert), []byte(tlsClientPrivateKey))
+		if err != nil {
+			return nil, err
+		}
+		transport.TLSClientConfig.Certificates = []tls.Certificate{clientKeyPairCert}
+	}
+
 	retryClient := retryablehttp.NewClient()
-	retryClient.RetryMax = 1
+	retryClient.CheckRetry = RetryPolicy
+	retryClient.RetryMax = 5
 	retryClient.RetryWaitMin = time.Second * 1
-	retryClient.RetryWaitMax = time.Second * 3
+	retryClient.RetryWaitMax = time.Second * 60
 
 	httpClient := retryClient.StandardClient()
 	httpClient.Timeout = time.Second * time.Duration(clientTimeout)
@@ -529,4 +618,61 @@ func newHttpClient(tlsInsecureSkipVerify bool, clientTimeout int, caCert string)
 	httpClient.Jar = cookieJar
 
 	return httpClient, nil
+}
+
+func newSignedJWT(ctx context.Context, url, clientId, alg, jwtSigningKey string) (string, error) {
+	// Create the Claims
+	jti, err := uuid.GenerateUUID()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate JWT ID: %v", err)
+	}
+
+	claims := jwt.MapClaims{
+		"jti": jti,
+		"iss": clientId,
+		"sub": clientId,
+		"aud": url,
+		"exp": jwt.NewNumericDate(time.Now().Add(time.Second * 60)),
+		"iat": jwt.NewNumericDate(time.Now()),
+	}
+
+	signingMethod := jwt.GetSigningMethod(alg)
+	if signingMethod == nil {
+		return "", fmt.Errorf("unsupported signing method: %s", alg)
+	}
+
+	// Create the token
+	token := jwt.NewWithClaims(jwt.GetSigningMethod(alg), claims)
+
+	var key any
+	if _, isRsa := signingMethod.(*jwt.SigningMethodRSA); isRsa {
+		key, err = jwt.ParseRSAPrivateKeyFromPEM([]byte(jwtSigningKey))
+	} else if _, isEcdsa := signingMethod.(*jwt.SigningMethodECDSA); isEcdsa {
+		key, err = jwt.ParseECPrivateKeyFromPEM([]byte(jwtSigningKey))
+	} else if _, isEd25519 := signingMethod.(*jwt.SigningMethodEd25519); isEd25519 {
+		key, err = jwt.ParseEdPrivateKeyFromPEM([]byte(jwtSigningKey))
+	} else {
+		err = fmt.Errorf("unsupported signing method: %s", signingMethod)
+	}
+
+	if err != nil {
+		return "", err
+	}
+	tokenString, err := token.SignedString(key)
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+
+	jwtClientAssertionArgs := map[string]any{
+		"jti": jti,
+	}
+	tflog.Debug(ctx, "Generated client_assertion", jwtClientAssertionArgs)
+
+	return tokenString, nil
+}
+
+// Expose the underlying http client for tests
+func (kc *KeycloakClient) GetHttpClient() *http.Client {
+	return kc.httpClient
 }
