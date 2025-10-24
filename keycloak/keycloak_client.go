@@ -359,6 +359,10 @@ func (keycloakClient *KeycloakClient) sendRequest(ctx context.Context, request *
 
 			keycloakClient.addRequestHeaders(request)
 
+			if body != nil {
+				request.Body = ioutil.NopCloser(bytes.NewReader(body))
+			}
+
 			// retry
 			shouldSendRequest = true
 			continue
