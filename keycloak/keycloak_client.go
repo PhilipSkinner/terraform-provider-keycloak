@@ -317,20 +317,6 @@ func (keycloakClient *KeycloakClient) sendRequest(ctx context.Context, request *
 	requestMethod := request.Method
 	requestPath := request.URL.Path
 
-	requestLogArgs := map[string]interface{}{
-		"method": requestMethod,
-		"path":   requestPath,
-	}
-
-	if body != nil {
-		request.Body = ioutil.NopCloser(bytes.NewReader(body))
-		requestLogArgs["body"] = string(body)
-	}
-
-	tflog.Debug(ctx, "Sending request", requestLogArgs)
-
-	keycloakClient.addRequestHeaders(request)
-
 	for shouldSendRequest {
 		shouldSendRequest = false
 		retryAttempts += 1
@@ -339,8 +325,18 @@ func (keycloakClient *KeycloakClient) sendRequest(ctx context.Context, request *
 			return nil, "", nil
 		}
 
+		requestLogArgs := map[string]interface{}{
+			"method": requestMethod,
+			"path":   requestPath,
+		}
+
+		tflog.Debug(ctx, "Sending request", requestLogArgs)
+
+		keycloakClient.addRequestHeaders(request)
+
 		if body != nil {
 			request.Body = ioutil.NopCloser(bytes.NewReader(body))
+			requestLogArgs["body"] = string(body)
 		}
 
 		response, err := keycloakClient.httpClient.Do(request)
@@ -360,8 +356,6 @@ func (keycloakClient *KeycloakClient) sendRequest(ctx context.Context, request *
 			if err != nil {
 				return nil, "", fmt.Errorf("error refreshing credentials: %s", err)
 			}
-
-			keycloakClient.addRequestHeaders(request)
 
 			// retry
 			shouldSendRequest = true
